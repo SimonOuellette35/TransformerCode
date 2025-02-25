@@ -12,19 +12,43 @@ def positional_encoding(seq_len, d_model):
     pe[:, 1::2] = torch.cos(position * div_term)
     return pe.unsqueeze(0)  # Shape: (1, seq_len, d_model)
 
+# RoPE positional encoding (Rotary Position Encoding)
+# TODO: I'm not sure this is implemented correctly because it doesn't seem to perform as 
+# well as the standard positional encoding above. Slower training convergence.
+def get_RoPE_embeddings(seq_len, dim):
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+    pos = torch.arange(seq_len, dtype=torch.float).unsqueeze(1)
+    sinusoid_inp = torch.einsum("ij,k->ik", pos, inv_freq)
+    embeddings = torch.cat((sinusoid_inp.sin(), sinusoid_inp.cos()), dim=-1)
+    return embeddings
+
+def apply_RoPE(x, positional_embeddings):
+    # Slice positional embeddings to match input sequence length
+    seq_len = x.size(1)
+    positional_embeddings = positional_embeddings[:seq_len, :]
+    # Expand positional embeddings to match batch dimension
+    positional_embeddings = positional_embeddings.expand(x.size(0), -1, -1)
+    # Element-wise multiplication
+    x_rotated = x * positional_embeddings
+    return x_rotated
 
 class StandardTransformerModel(nn.Module):
-    def __init__(self, d_model, num_heads, num_layers, input_vocab_size, target_vocab_size, seq_length, 
-                 device='cuda'):
+
+    def __init__(self, d_model, num_heads, num_layers, input_vocab_size, target_vocab_size, seq_length,
+                 use_rope_embedding=False, device='cuda'):
         super(StandardTransformerModel, self).__init__()
         self.seq_length = seq_length
         self.device = device
+        self.use_rope_embedding = use_rope_embedding
 
         self.src_embedding = nn.Embedding(input_vocab_size, d_model)
         self.tgt_embedding = nn.Embedding(target_vocab_size, d_model)
         
-        self.pos_encoding = positional_encoding(seq_length, d_model).to(device)
-        
+        if self.use_rope_embedding:
+            self.pos_encoding = get_RoPE_embeddings(seq_length, d_model).to(device)
+        else:
+            self.pos_encoding = positional_encoding(seq_length, d_model).to(device)
+
         # Create masks once during initialization
         self.causal_mask = torch.triu(torch.ones(seq_length, seq_length), diagonal=1).bool()
         
@@ -48,9 +72,15 @@ class StandardTransformerModel(nn.Module):
         tgt_mask = self.causal_mask[:tgt_input.size(1), :tgt_input.size(1)].to(self.device)
 
         # Embedding and positional encoding
-        src_emb = self.src_embedding(src) + self.pos_encoding[:, :src.size(1), :]
-        tgt_emb = self.tgt_embedding(tgt_input) + self.pos_encoding[:, :tgt_input.size(1), :]
-        
+        src_emb = self.src_embedding(src)
+        tgt_emb = self.tgt_embedding(tgt_input)
+        if self.use_rope_embedding:
+            src_emb = apply_RoPE(src_emb, self.pos_encoding)
+            tgt_emb = apply_RoPE(tgt_emb, self.pos_encoding)
+        else:
+            src_emb = src_emb + self.pos_encoding[:, :src_emb.size(1), :]
+            tgt_emb = tgt_emb + self.pos_encoding[:, :tgt_emb.size(1), :]
+
         # Transformer layers
         memory = self.encoder(src_emb)
         output = self.decoder(tgt_emb, memory, tgt_mask=tgt_mask)

@@ -59,18 +59,12 @@ def evaluate(dataloader):
         correct = 0
         total = 0
         with torch.no_grad():
-            displayed = False
             for X_batch, Y_batch in dataloader:
                 X_batch = X_batch.to(device)
                 Y_batch = Y_batch.to(device)
                 predictions = model.generate(X_batch, SOS_token)
                 correct += (predictions == Y_batch).sum().item()
                 total += X_batch.numel()
-
-                if not displayed:
-                    print("Example: x = ", X_batch[0])
-                    print("\tpredicted = ", predictions[0])
-                    print("\tground truth = ", Y_batch[0])
 
     return (correct / total) * 100
 
