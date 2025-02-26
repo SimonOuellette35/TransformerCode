@@ -20,16 +20,16 @@ np.random.seed(DET_SEED)
 # Hyperparameters
 num_epochs = 1000
 batch_size = 50
-d_model = 128   # Transformer model size
-num_heads = 4
+d_model = 64   # Transformer model size
+num_heads = 8
 num_layers = 2
 input_vocab_size = 13  # 0-9 digits, row marker (10), EOS (11), PAD (12)
 num_classes = 3  # Output vocabulary size (+1 for SOS token)
-learning_rate = 0.0002
+learning_rate = 0.0001
 SOS_token = num_classes - 1  # Define start-of-sequence token
 max_seq_length = 86  # Updated to match Y tensor size (43 + 1 for SOS token)
 
-trainN = 30000
+trainN = 20000
 valN = 200
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -83,6 +83,10 @@ def generate_data(num_samples=1000):
         # Rotate grid according to chosen rotation
         hflip_grid = torch.flip(grid, dims=[1])  # Flip horizontally by flipping columns
         vflip_grid = torch.flip(grid, dims=[0])  # Flip vertically by flipping rows
+
+        # Convert all non-zero values in the flipped grids to 5
+        hflip_grid = torch.where(hflip_grid > 0, torch.tensor(5, dtype=torch.long), hflip_grid)
+        vflip_grid = torch.where(vflip_grid > 0, torch.tensor(5, dtype=torch.long), vflip_grid)
 
         if torch.equal(hflip_grid, vflip_grid):
             # Under-determined grid... don't keep it.
@@ -210,7 +214,7 @@ model = StandardTransformerModel(d_model,
                                  num_classes,
                                  max_seq_length).to(device)
 
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.001)
 
 print(f"Training for {num_epochs} epochs on a total of {trainN} samples...")
 # Training Loop
@@ -229,9 +233,9 @@ for idx, epoch in enumerate(range(num_epochs)):
         total_loss += loss.item()
         
     if (epoch + 1) % 10 == 0:
-        # if epoch > 500:
-        #     accuracy = evaluate(val_loader, verbose=True)
-        # else:
-        accuracy = evaluate(val_loader)
+        if epoch > 500:
+            accuracy = evaluate(val_loader, verbose=True)
+        else:
+            accuracy = evaluate(val_loader)
         
         print(f"Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.6f}, Validation Accuracy: {accuracy:.2f}%")

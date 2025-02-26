@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import math
 
 
 # Positional Encoding function
@@ -35,14 +36,23 @@ def apply_RoPE(x, positional_embeddings):
 class StandardTransformerModel(nn.Module):
 
     def __init__(self, d_model, num_heads, num_layers, input_vocab_size, target_vocab_size, seq_length,
-                 use_rope_embedding=False, device='cuda'):
+                 use_rope_embedding=False, device='cuda', dropout=0.1):
         super(StandardTransformerModel, self).__init__()
         self.seq_length = seq_length
         self.device = device
         self.use_rope_embedding = use_rope_embedding
+        self.d_model = d_model
 
+        # Initialize embeddings with better scaling
         self.src_embedding = nn.Embedding(input_vocab_size, d_model)
         self.tgt_embedding = nn.Embedding(target_vocab_size, d_model)
+        
+        # Initialize embeddings with Xavier/Glorot initialization
+        nn.init.xavier_uniform_(self.src_embedding.weight, gain=1.0)
+        nn.init.xavier_uniform_(self.tgt_embedding.weight, gain=1.0)
+        
+        # Scale embeddings by sqrt(d_model)
+        self.embed_scale = math.sqrt(d_model)
         
         if self.use_rope_embedding:
             self.pos_encoding = get_RoPE_embeddings(seq_length, d_model).to(device)
@@ -52,15 +62,43 @@ class StandardTransformerModel(nn.Module):
         # Create masks once during initialization
         self.causal_mask = torch.triu(torch.ones(seq_length, seq_length), diagonal=1).bool()
         
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads, batch_first=True)
-        decoder_layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=num_heads, batch_first=True)
+        # Add dropout for regularization
+        self.dropout = nn.Dropout(dropout)
         
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        # Create encoder and decoder with improved parameters
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, 
+            nhead=num_heads, 
+            dim_feedforward=d_model * 4,  # Increased feedforward dimension
+            dropout=dropout,
+            activation='gelu',  # Using GELU activation instead of ReLU
+            batch_first=True,
+            norm_first=True  # Pre-normalization for better training stability
+        )
+        
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=d_model, 
+            nhead=num_heads, 
+            dim_feedforward=d_model * 4,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True
+        )
+        
+        # Add layer normalization
+        encoder_norm = nn.LayerNorm(d_model)
+        decoder_norm = nn.LayerNorm(d_model)
+        
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, norm=encoder_norm)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers, norm=decoder_norm)
         
         self.fc = nn.Linear(d_model, target_vocab_size)
+        # Initialize output projection with Xavier/Glorot
+        nn.init.xavier_uniform_(self.fc.weight)
+        nn.init.zeros_(self.fc.bias)
 
-        self.criterion = nn.CrossEntropyLoss()
+        self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1)  # Add label smoothing
 
     def forward(self, src, tgt, use_teacher_forcing=True):
         if use_teacher_forcing:
@@ -71,15 +109,20 @@ class StandardTransformerModel(nn.Module):
         # Create causal mask for decoder
         tgt_mask = self.causal_mask[:tgt_input.size(1), :tgt_input.size(1)].to(self.device)
 
-        # Embedding and positional encoding
-        src_emb = self.src_embedding(src)
-        tgt_emb = self.tgt_embedding(tgt_input)
+        # Embedding and positional encoding with scaling
+        src_emb = self.src_embedding(src) * self.embed_scale
+        tgt_emb = self.tgt_embedding(tgt_input) * self.embed_scale
+        
         if self.use_rope_embedding:
             src_emb = apply_RoPE(src_emb, self.pos_encoding)
             tgt_emb = apply_RoPE(tgt_emb, self.pos_encoding)
         else:
             src_emb = src_emb + self.pos_encoding[:, :src_emb.size(1), :]
             tgt_emb = tgt_emb + self.pos_encoding[:, :tgt_emb.size(1), :]
+        
+        # Apply dropout after embedding and positional encoding
+        src_emb = self.dropout(src_emb)
+        tgt_emb = self.dropout(tgt_emb)
 
         # Transformer layers
         memory = self.encoder(src_emb)
@@ -93,17 +136,35 @@ class StandardTransformerModel(nn.Module):
         # Start with SOS token
         decoded = torch.full((batch_size, 1), SOS_token, dtype=torch.long, device=self.device)
         
-        # Generate exactly seq_length tokens (excluding SOS)
-        for i in range(self.seq_length):
+        # For classification tasks, we only need to generate a few tokens
+        max_gen_length = 2  # For SOS + class label
+        
+        # Generate tokens auto-regressively
+        for i in range(max_gen_length - 1):  # -1 because we already have SOS
+            # Forward pass through the model
             output = self.forward(X_batch, decoded, use_teacher_forcing=False)
-            next_token = output[:, -1].argmax(dim=1)
-
-            decoded = torch.cat([decoded, next_token.unsqueeze(1)], dim=1)
             
-        predictions = decoded[:, :self.seq_length]
+            # Get the most likely next token
+            next_token_logits = output[:, -1, :]
+            next_token = next_token_logits.argmax(dim=1)
+            
+            # Append the predicted token to the sequence
+            decoded = torch.cat([decoded, next_token.unsqueeze(1)], dim=1)
+        
+        # For debugging: print confidence scores for the classification
+        if batch_size > 0 and max_gen_length > 1:
+            # Get the logits for the first prediction after SOS
+            class_logits = self.forward(X_batch, decoded[:, :1], use_teacher_forcing=False)[:, 0, :]
+            class_probs = torch.nn.functional.softmax(class_logits, dim=1)
+            
+            # For the first example in the batch
+            if False:  # Set to True for debugging
+                print("Classification probabilities for first example:")
+                for i in range(class_probs.size(1)):
+                    print(f"Class {i}: {class_probs[0, i].item():.4f}")
+        
+        return decoded
 
-        return predictions
-    
     def loss(self, preds, targets):
         tgt = targets[:, 1:]
 
@@ -112,3 +173,4 @@ class StandardTransformerModel(nn.Module):
         target_flat = tgt.contiguous().view(-1)
         
         return self.criterion(preds_flat, target_flat)
+        

@@ -5,6 +5,9 @@ from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 from models.transformer_model import StandardTransformerModel
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 
 # ======================================================= Setup & Hyper-parameters =========================================================
 
@@ -18,103 +21,119 @@ np.random.seed(DET_SEED)
 
 
 # Hyperparameters
-num_epochs = 1000
+num_epochs = 5000
 batch_size = 50
-d_model = 128   # Transformer model size
-num_heads = 4
-num_layers = 2
-input_vocab_size = 13  # 0-9 digits, row marker (10), EOS (11), PAD (12)
-num_classes = 3  # Output vocabulary size (+1 for SOS token)
-learning_rate = 0.0002
+d_model = 256
+num_heads = 16
+num_layers = 4
+input_vocab_size = 13
+num_classes = 4
+learning_rate = 0.0001  # Slightly increased initial learning rate
 SOS_token = num_classes - 1  # Define start-of-sequence token
-max_seq_length = 86  # Updated to match Y tensor size (43 + 1 for SOS token)
+max_seq_length = 80
 
-trainN = 30000
-valN = 200
+trainN = 5000
+valN = 100
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ========================================================= Toy problem data generation =====================================================
 
-# Generate toy grid data
-# This dataset works as follows:
-# X contains 5x5 or 6x6 grids with random integers from 0-9
-# Y contains the same grid flipped either vertically or horizontally, randomly
-# Each row ends with token 10, and sequence ends with token 11 (EOS)
-# For 5x5 grids, remaining tokens are padded with 12 (PAD)
-# The task is to classify whether Y is a horizontal or vertical flip of X
-def generate_data(num_samples=1000):
-    # Randomly choose between 5x5 and 6x6 grids for each sample
-    grid_sizes = torch.randint(5, 7, (num_samples,))
+# We generate 3 types of input grid to output grid transformations:
+# 1. vmirror + change non-black pixels to yellow
+# 2. hmirror + change non-black pixels to yellow
+# 3. shift pixels to the right
+
+# The goal of this datasets is that the model must learn to classify which type of operation was applied between
+# the two input grids.
+import json
+
+def concat(a, b):
+    # Re-tokenize a and b
+    # Tokens 3 to 12 are renumbered 0 to 9 (remove 3 from the value)
+    # Tokens 0 become 12 (PAD)
+    # Tokens 1 become 10 (Row marker)
+    # Tokens 2 become 11 (EOS)
     
-    # Calculate max sequence length needed (including row markers and EOS)
-    # For a NxN grid: N rows * (N cols + 1 row marker) + 1 EOS token
-    max_len = 6 * 7 + 1  # Maximum possible length (6x6 grid)
+    a_retokenized = []
+    b_retokenized = []
     
-    # Initialize tensors with padding token 12
-    X = torch.full((num_samples, max_len), 12, dtype=torch.long)
-    Y = torch.full((num_samples, max_len), 12, dtype=torch.long)  # Intermediate tensor for rotated grid
-    combined_input = torch.full((num_samples, 2*max_len), 12, dtype=torch.long)  # Will hold concatenated X and Y
-    labels = torch.full((num_samples, 2), 12, dtype=torch.long)  # +1 for SOS token
+    for token in a[0]:
+        if token == 0:
+            a_retokenized.append(12)  # PAD
+        elif token == 1:
+            a_retokenized.append(10)  # Row marker
+        elif token == 2:
+            a_retokenized.append(11)  # EOS
+        elif 3 <= token <= 12:
+            a_retokenized.append(token - 3)  # Renumber 3-12 to 0-9
+        else:
+            print("ERROR")
+            a_retokenized.append(token)  # Keep other tokens unchanged
     
-    # Generate data for each sample
-    i = 0
-    while i < num_samples:
-        N = grid_sizes[i].item()
+    for token in b[0]:
+        if token == 0:
+            b_retokenized.append(12)  # PAD
+        elif token == 1:
+            b_retokenized.append(10)  # Row marker
+        elif token == 2:
+            b_retokenized.append(11)  # EOS
+        elif 3 <= token <= 12:
+            b_retokenized.append(token - 3)  # Renumber 3-12 to 0-9
+        else:
+            print("ERROR")
+            b_retokenized.append(token)  # Keep other tokens unchanged
 
-        # Generate grid with at least 4 non-zero cells
-        grid = torch.zeros((N, N), dtype=torch.long)
-        num_nonzero = torch.randint(4, N*N+1, (1,)).item()  # Random number between 4 and N*N
-        nonzero_positions = torch.randperm(N*N)[:num_nonzero]  # Random positions for non-zero elements
-        nonzero_values = torch.randint(1, 10, (num_nonzero,))  # Random non-zero values between 1-9
-        grid.view(-1)[nonzero_positions] = nonzero_values
-        
-        # Convert input grid to sequence with row markers
-        pos = 0
-        for row in range(N):
-            X[i, pos:pos+N] = grid[row]  # Add row values
-            X[i, pos+N] = 10  # Add row marker
-            pos += N + 1
-        X[i, pos] = 11  # Add EOS token
-        
-        # Randomly choose between horizontal and vertical flip
-        flip_type = torch.randint(0, 2, (1,)).item()  # 0 for horizontal flip, 1 for vertical flip
-        
-        # Rotate grid according to chosen rotation
-        hflip_grid = torch.flip(grid, dims=[1])  # Flip horizontally by flipping columns
-        vflip_grid = torch.flip(grid, dims=[0])  # Flip vertically by flipping rows
+    return a_retokenized + b_retokenized
 
-        if torch.equal(hflip_grid, vflip_grid):
-            # Under-determined grid... don't keep it.
-            continue
+def load_data(num_samples=1000, filename='training_data.json'):
+    input_grids = []
+    output_grids = []
+    task_classes = []
+    X_train = []
+    Y_train = []
 
-        # Convert flipped grid to sequence with row markers
-        pos = 0
-        for row in range(N):
-            if flip_type == 0:
-                Y[i, pos:pos+N] = hflip_grid[row]  # Add rotated row values
-            else:
-                Y[i, pos:pos+N] = vflip_grid[row]  # Add rotated row values
-            Y[i, pos+N] = 10  # Add row marker
-            pos += N + 1
-        Y[i, pos] = 11  # Add EOS token
-        
-        if torch.equal(X, Y):
-            continue
+    with open(filename, 'r') as f:
+        # Read up to num_samples lines
+        for i, line in enumerate(f):
+            if i >= num_samples:
+                break
+                
+            data = json.loads(line)
+            input_grids.append(data['input_grids'])
+            output_grids.append(data['output_grids']) 
+            task_classes.append(data['task_class'])
 
-        # Concatenate X and Y for the input
-        combined_input[i, :max_len] = X[i]
-        combined_input[i, max_len:2*max_len] = Y[i]
-        
-        # Create label with SOS token
-        labels[i, 0] = SOS_token
-        labels[i, 1] = flip_type  # 0 for horizontal flip, 1 for vertical flip
-        i += 1
+    for idx in range(len(input_grids)):
+        tmp_X = concat(input_grids[idx], output_grids[idx])
 
-    return combined_input, labels
+        # Remove debug print
+        X_train.append(tmp_X)
+        Y_train.append([SOS_token, task_classes[idx]])
 
-X_train, Y_train = generate_data(trainN)
-X_val, Y_val = generate_data(valN)
+    # Convert to PyTorch tensors
+    X_train = torch.tensor(np.array(X_train), dtype=torch.long)
+    Y_train = torch.tensor(np.array(Y_train), dtype=torch.long)
+    
+    return X_train, Y_train
+
+# Load data with a progress bar
+print("Loading training data...")
+X_train, Y_train = load_data(trainN, 'training_data.json')
+print("Loading validation data...")
+X_val, Y_val = load_data(valN, 'validation_data.json')
+
+# Check class distribution
+train_class_counts = {}
+for y in Y_train[:, 1].numpy():
+    train_class_counts[y] = train_class_counts.get(y, 0) + 1
+print(f"Training class distribution: {train_class_counts}")
+
+val_class_counts = {}
+for y in Y_val[:, 1].numpy():
+    val_class_counts[y] = val_class_counts.get(y, 0) + 1
+print(f"Validation class distribution: {val_class_counts}")
+
 dataset_train = TensorDataset(X_train, Y_train)
 dataset_val = TensorDataset(X_val, Y_val)
 train_loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=True)
@@ -166,17 +185,17 @@ def evaluate(dataloader, verbose=False):
                             grid = []
                             current_row = []
                             for token in seq:
-                                if token == 10:  # Row marker
+                                if token == 1:  # Row marker
                                     if current_row:  # Only append if row is not empty
                                         grid.append(current_row)
                                         current_row = []
-                                elif token == 11:  # EOS token
+                                elif token == 2:  # EOS token
                                     if current_row:  # Only append if row is not empty
                                         grid.append(current_row)
                                     break
-                                elif token == 12:  # PAD token
+                                elif token == 0:  # PAD token
                                     continue
-                                else:
+                                elif token >= 3 and token <= 12:  # Pixel colors
                                     current_row.append(token)
                             return np.array(grid)
                         
@@ -202,36 +221,57 @@ def evaluate(dataloader, verbose=False):
 
     return (correct / total) * 100
 
-# Initialize model
+# Initialize model with dropout
 model = StandardTransformerModel(d_model, 
                                  num_heads, 
                                  num_layers, 
                                  input_vocab_size, 
                                  num_classes,
-                                 max_seq_length).to(device)
+                                 max_seq_length,
+                                 dropout=0.2).to(device)  # Added dropout parameter
+
+# Calculate and display the number of parameters in the model
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+total_params = count_parameters(model)
+print(f"Model has {total_params:,} trainable parameters")
 
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+# Add learning rate scheduler
+scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=200, 
+                             verbose=True, min_lr=1e-6)
 
 print(f"Training for {num_epochs} epochs on a total of {trainN} samples...")
+train_losses = []
 # Training Loop
-for idx, epoch in enumerate(range(num_epochs)):
+for epoch in range(num_epochs):
     model.train()
     total_loss = 0
-    for X_batch, Y_batch in train_loader:
+    for X_batch, Y_batch in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
         X_batch, Y_batch = X_batch.to(device), Y_batch.to(device)
+
         optimizer.zero_grad()
         output = model(X_batch, Y_batch)
 
         loss = model.loss(output, Y_batch)
 
         loss.backward()
+        # Add gradient clipping to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         total_loss += loss.item()
-        
-    if (epoch + 1) % 10 == 0:
-        # if epoch > 500:
-        #     accuracy = evaluate(val_loader, verbose=True)
-        # else:
-        accuracy = evaluate(val_loader)
-        
-        print(f"Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.6f}, Validation Accuracy: {accuracy:.2f}%")
+
+    avg_loss = total_loss/len(train_loader)
+    train_losses.append(avg_loss)
+    
+    # Update learning rate based on loss
+    scheduler.step(avg_loss)
+    
+    if epoch % 100 == 0:
+        val_accuracy = evaluate(val_loader)
+        train_accuracy = evaluate(train_loader)
+
+        print(f"Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.6f}, Train. Accuracy: {train_accuracy:.2f}%, Val. Accuracy: {val_accuracy:.2f}%")
+    else:
+        print(f"Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.6f}")
