@@ -10,3 +10,6 @@ The scripts are careful to differentiate teacher forcing-based loss/accuracy dur
 - **eval_grid_rot180.py**: we generate 5x5 or 6x6 ARC-like grids, and it must rotate the grid by 180 degrees.
 - **eval_grid_rot90.py**: we generate 5x5 or 6x6 ARC-like grids, and it must rotate the grid by 90 degrees.
 - **eval_grid_rot_class.py**: we generate pairs of 5x5 or 6x6 ARC-like grids, the second one being either a 90 degree or a 180 degree rotation of the first. The transformer must classify whether it was a 90-degree rotation or a 180-degree rotation.
+- **eval_grid_flip_class.py**: similar to eval_grid_rot_class.py, but it's horizontal and vertical flips instead of rotations.
+- **eval_grid_flipcolor_class.py**: similar to eval_grid_flip_class.py, but we add an extra step of changing the non-zero pixels' colors to generate the target grid. Still must distinguish between horizontal and vertical flip (it must ignore the fact that the pixel colors changed).
+- **eval_transform_classification.py**: loads data from .json files. Instructions on how to generate these data files soon to be added.
