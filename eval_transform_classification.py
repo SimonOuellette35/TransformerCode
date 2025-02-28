@@ -7,6 +7,7 @@ from models.transformer_model import StandardTransformerModel
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+import json
 
 
 # ======================================================= Setup & Hyper-parameters =========================================================
@@ -30,9 +31,9 @@ input_vocab_size = 13
 num_classes = 4
 learning_rate = 0.0001  # Slightly increased initial learning rate
 SOS_token = num_classes - 1  # Define start-of-sequence token
-max_seq_length = 80
+max_seq_length = 86
 
-trainN = 5000
+trainN = 10000
 valN = 100
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -46,71 +47,33 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # The goal of this datasets is that the model must learn to classify which type of operation was applied between
 # the two input grids.
-import json
 
-def concat(a, b):
-    # Re-tokenize a and b
-    # Tokens 3 to 12 are renumbered 0 to 9 (remove 3 from the value)
-    # Tokens 0 become 12 (PAD)
-    # Tokens 1 become 10 (Row marker)
-    # Tokens 2 become 11 (EOS)
-    
-    a_retokenized = []
-    b_retokenized = []
-    
-    for token in a[0]:
-        if token == 0:
-            a_retokenized.append(12)  # PAD
-        elif token == 1:
-            a_retokenized.append(10)  # Row marker
-        elif token == 2:
-            a_retokenized.append(11)  # EOS
-        elif 3 <= token <= 12:
-            a_retokenized.append(token - 3)  # Renumber 3-12 to 0-9
-        else:
-            print("ERROR")
-            a_retokenized.append(token)  # Keep other tokens unchanged
-    
-    for token in b[0]:
-        if token == 0:
-            b_retokenized.append(12)  # PAD
-        elif token == 1:
-            b_retokenized.append(10)  # Row marker
-        elif token == 2:
-            b_retokenized.append(11)  # EOS
-        elif 3 <= token <= 12:
-            b_retokenized.append(token - 3)  # Renumber 3-12 to 0-9
-        else:
-            print("ERROR")
-            b_retokenized.append(token)  # Keep other tokens unchanged
-
-    return a_retokenized + b_retokenized
-
-def load_data(num_samples=1000, filename='training_data.json'):
-    input_grids = []
-    output_grids = []
-    task_classes = []
+def load_data(num_samples=1000, filename='training.json'):
     X_train = []
     Y_train = []
 
-    with open(filename, 'r') as f:
-        # Read up to num_samples lines
-        for i, line in enumerate(f):
-            if i >= num_samples:
-                break
+    try:
+        with open(filename, 'r') as f:
+            data_list = json.load(f)
+            # Take only up to num_samples
+            data_list = data_list[:num_samples]
+            
+            for data in data_list:
+                X_train.append(data['input_sequence'])
+                Y_train.append(data['task_desc'])
                 
-            data = json.loads(line)
-            input_grids.append(data['input_grids'])
-            output_grids.append(data['output_grids']) 
-            task_classes.append(data['task_class'])
-
-    for idx in range(len(input_grids)):
-        tmp_X = concat(input_grids[idx], output_grids[idx])
-
-        # Remove debug print
-        X_train.append(tmp_X)
-        Y_train.append([SOS_token, task_classes[idx]])
-
+    except json.JSONDecodeError:
+        # Fallback for line-delimited JSON
+        with open(filename, 'r') as f:
+            # Read up to num_samples lines
+            for i, line in enumerate(f):
+                if i >= num_samples:
+                    break
+                    
+                data = json.loads(line)
+                X_train.append(data['input_sequence'])
+                Y_train.append(data['task_desc'])
+            
     # Convert to PyTorch tensors
     X_train = torch.tensor(np.array(X_train), dtype=torch.long)
     Y_train = torch.tensor(np.array(Y_train), dtype=torch.long)
@@ -119,9 +82,9 @@ def load_data(num_samples=1000, filename='training_data.json'):
 
 # Load data with a progress bar
 print("Loading training data...")
-X_train, Y_train = load_data(trainN, 'training_data.json')
+X_train, Y_train = load_data(trainN, 'training.json')
 print("Loading validation data...")
-X_val, Y_val = load_data(valN, 'validation_data.json')
+X_val, Y_val = load_data(valN, 'validation.json')
 
 # Check class distribution
 train_class_counts = {}
