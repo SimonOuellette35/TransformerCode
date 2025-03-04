@@ -22,8 +22,8 @@ np.random.seed(DET_SEED)
 
 
 # Hyperparameters
-num_epochs = 5000
-batch_size = 50
+num_epochs = 500
+batch_size = 25
 d_model = 256
 num_heads = 16
 num_layers = 4
@@ -191,7 +191,7 @@ model = StandardTransformerModel(d_model,
                                  input_vocab_size, 
                                  num_classes,
                                  max_seq_length,
-                                 dropout=0.2).to(device)  # Added dropout parameter
+                                 dropout=0.1).to(device)  # Added dropout parameter
 
 # Calculate and display the number of parameters in the model
 def count_parameters(model):
@@ -202,8 +202,8 @@ print(f"Model has {total_params:,} trainable parameters")
 
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 # Add learning rate scheduler
-scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=200, 
-                             verbose=True, min_lr=1e-6)
+scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=100, 
+                             verbose=True, min_lr=1e-5)
 
 print(f"Training for {num_epochs} epochs on a total of {trainN} samples...")
 train_losses = []
